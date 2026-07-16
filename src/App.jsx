@@ -18,8 +18,24 @@ import {
   MoreVertical,
   Maximize2,
   AlignCenter,
-  Layout
+  Layout,
+  RotateCcw,
+  ZoomIn,
+  ZoomOut
 } from 'lucide-react'
+import {
+  initDatabase,
+  saveLayers,
+  getLayers,
+  saveHistory,
+  getHistory,
+  saveSetting,
+  getSetting,
+  saveProject,
+  getProject,
+  getAllProjects,
+  deleteProject
+} from './db.js'
 
 function App() {
   const [layers, setLayers] = useState([])
@@ -31,6 +47,11 @@ function App() {
   const [isDragging, setIsDragging] = useState(false)
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 })
   const [draggedLayerId, setDraggedLayerId] = useState(null)
+  const [mouseDownPosition, setMouseDownPosition] = useState(null)
+  const [zoomLevel, setZoomLevel] = useState(1)
+  const [panOffset, setPanOffset] = useState({ x: 0, y: 0 })
+  const [isPanning, setIsPanning] = useState(false)
+  const [panStart, setPanStart] = useState({ x: 0, y: 0 })
   const [isResizing, setIsResizing] = useState(false)
   const [resizeHandle, setResizeHandle] = useState(null)
   const [resizeStart, setResizeStart] = useState({ x: 0, y: 0, width: 0, height: 0 })
@@ -38,6 +59,9 @@ function App() {
   const [rotationStart, setRotationStart] = useState({ x: 0, y: 0, angle: 0 })
   const [isShiftPressed, setIsShiftPressed] = useState(false)
   const [isCtrlPressed, setIsCtrlPressed] = useState(false)
+  const [isRPressed, setIsRPressed] = useState(false)
+  const [isSPressed, setIsSPressed] = useState(false)
+  const [isGPressed, setIsGPressed] = useState(false)
   const [hoveredHandle, setHoveredHandle] = useState(null)
   const [contextMenu, setContextMenu] = useState({ visible: false, x: 0, y: 0, layerId: null })
   const [fileMenu, setFileMenu] = useState({ visible: false, x: 0, y: 0 })
@@ -45,6 +69,11 @@ function App() {
   const [dragDirection, setDragDirection] = useState(null) // 'horizontal' or 'vertical' or null
   const [rotationMode, setRotationMode] = useState(false) // Rotation mode via double-click
   const [aspectRatioMenu, setAspectRatioMenu] = useState(false)
+  const [transformPanel, setTransformPanel] = useState({ visible: false, layerId: null })
+  const [layersCollapsed, setLayersCollapsed] = useState(false)
+  const [transformCollapsed, setTransformCollapsed] = useState(false)
+  const [resetConfirmModal, setResetConfirmModal] = useState(false)
+  const [autoShowTransform, setAutoShowTransform] = useState(true)
   const projectInputRef = useRef(null)
   const [history, setHistory] = useState([])
   const [historyIndex, setHistoryIndex] = useState(-1)
@@ -65,11 +94,56 @@ function App() {
     newHistory.push(JSON.parse(JSON.stringify(newLayers)))
     setHistory(newHistory)
     setHistoryIndex(newHistory.length - 1)
+    saveHistory(newHistory)
   }
+
+  // Initialize database and load saved data
+  useEffect(() => {
+    const initApp = async () => {
+      await initDatabase()
+      
+      // Load saved aspect ratio
+      const savedAspectRatio = await getSetting('aspectRatio')
+      if (savedAspectRatio) {
+        setAspectRatio(savedAspectRatio)
+      }
+      
+      // Load saved layers
+      const savedLayers = await getLayers()
+      if (savedLayers.length > 0) {
+        setLayers(savedLayers)
+      }
+      
+      // Load saved history
+      const savedHistory = await getHistory()
+      if (savedHistory.length > 0) {
+        setHistory(savedHistory)
+        setHistoryIndex(savedHistory.length - 1)
+      }
+    }
+    
+    initApp()
+  }, [])
+
+  // Auto-save layers to database when they change (debounced)
+  useEffect(() => {
+    if (layers.length === 0) return
+    
+    const timeoutId = setTimeout(() => {
+      saveLayers(layers)
+    }, 500) // Save after 500ms of no changes
+    
+    return () => clearTimeout(timeoutId)
+  }, [layers])
+
+  // Auto-save aspect ratio to database when it changes
+  useEffect(() => {
+    saveSetting('aspectRatio', aspectRatio)
+  }, [aspectRatio])
 
   useEffect(() => {
     renderCanvas()
-  }, [layers, aspectRatio])
+  }, [layers, aspectRatio, zoomLevel, panOffset])
 
   useEffect(() => {
     const handleKeyDown = (e) => {
@@ -78,6 +152,15 @@ function App() {
       }
       if (e.key === 'Control') {
         setIsCtrlPressed(true)
+      }
+      if (e.key === 'r' || e.key === 'R') {
+        setIsRPressed(true)
+      }
+      if (e.key === 's' || e.key === 'S') {
+        setIsSPressed(true)
+      }
+      if (e.key === 'g' || e.key === 'G') {
+        setIsGPressed(true)
       }
       if (e.ctrlKey && e.key === 'z') {
         e.preventDefault()
@@ -93,6 +176,177 @@ function App() {
           setHistoryIndex(historyIndex - 1)
         }
       }
+      
+      // Shift + A to open image upload dialog
+      if (e.shiftKey && (e.key === 'a' || e.key === 'A')) {
+        e.preventDefault()
+        fileInputRef.current?.click()
+      }
+      
+      // Rotate with R + Arrow keys
+      if (isRPressed && selectedLayerId) {
+        if (e.key === 'ArrowRight') {
+          e.preventDefault()
+          setLayers(layers.map(layer => {
+            if (layer.id === selectedLayerId) {
+              return {
+                ...layer,
+                rotation: (layer.rotation || 0) + 5
+              }
+            }
+            return layer
+          }))
+        } else if (e.key === 'ArrowLeft') {
+          e.preventDefault()
+          setLayers(layers.map(layer => {
+            if (layer.id === selectedLayerId) {
+              return {
+                ...layer,
+                rotation: (layer.rotation || 0) - 5
+              }
+            }
+            return layer
+          }))
+        }
+      }
+      
+      // Scale with S + Arrow keys
+      if (isSPressed && selectedLayerId) {
+        if (e.key === 'ArrowUp') {
+          e.preventDefault()
+          setLayers(layers.map(layer => {
+            if (layer.id === selectedLayerId) {
+              if (layer.type === 'image') {
+                return {
+                  ...layer,
+                  scale: Math.max(0.1, (layer.scale || 1) + 0.05)
+                }
+              } else if (layer.type === 'circle') {
+                return {
+                  ...layer,
+                  radius: Math.max(10, layer.radius + 2)
+                }
+              } else if (layer.type === 'square') {
+                return {
+                  ...layer,
+                  size: Math.max(20, layer.size + 4)
+                }
+              } else if (layer.type === 'text' || layer.type === 'emoji') {
+                return {
+                  ...layer,
+                  fontSize: Math.max(12, (layer.fontSize || 48) + 2)
+                }
+              }
+            }
+            return layer
+          }))
+        } else if (e.key === 'ArrowDown') {
+          e.preventDefault()
+          setLayers(layers.map(layer => {
+            if (layer.id === selectedLayerId) {
+              if (layer.type === 'image') {
+                return {
+                  ...layer,
+                  scale: Math.max(0.1, (layer.scale || 1) - 0.05)
+                }
+              } else if (layer.type === 'circle') {
+                return {
+                  ...layer,
+                  radius: Math.max(10, layer.radius - 2)
+                }
+              } else if (layer.type === 'square') {
+                return {
+                  ...layer,
+                  size: Math.max(20, layer.size - 4)
+                }
+              } else if (layer.type === 'text' || layer.type === 'emoji') {
+                return {
+                  ...layer,
+                  fontSize: Math.max(12, (layer.fontSize || 48) - 2)
+                }
+              }
+            }
+            return layer
+          }))
+        }
+      }
+      
+      // Move with G + Arrow keys
+      if (isGPressed && selectedLayerId) {
+        if (e.key === 'ArrowUp') {
+          e.preventDefault()
+          setLayers(layers.map(layer => {
+            if (layer.id === selectedLayerId) {
+              if (layer.type === 'line') {
+                return {
+                  ...layer,
+                  y1: layer.y1 - 2,
+                  y2: layer.y2 - 2
+                }
+              }
+              return {
+                ...layer,
+                y: layer.y - 2
+              }
+            }
+            return layer
+          }))
+        } else if (e.key === 'ArrowDown') {
+          e.preventDefault()
+          setLayers(layers.map(layer => {
+            if (layer.id === selectedLayerId) {
+              if (layer.type === 'line') {
+                return {
+                  ...layer,
+                  y1: layer.y1 + 2,
+                  y2: layer.y2 + 2
+                }
+              }
+              return {
+                ...layer,
+                y: layer.y + 2
+              }
+            }
+            return layer
+          }))
+        } else if (e.key === 'ArrowLeft') {
+          e.preventDefault()
+          setLayers(layers.map(layer => {
+            if (layer.id === selectedLayerId) {
+              if (layer.type === 'line') {
+                return {
+                  ...layer,
+                  x1: layer.x1 - 2,
+                  x2: layer.x2 - 2
+                }
+              }
+              return {
+                ...layer,
+                x: layer.x - 2
+              }
+            }
+            return layer
+          }))
+        } else if (e.key === 'ArrowRight') {
+          e.preventDefault()
+          setLayers(layers.map(layer => {
+            if (layer.id === selectedLayerId) {
+              if (layer.type === 'line') {
+                return {
+                  ...layer,
+                  x1: layer.x1 + 2,
+                  x2: layer.x2 + 2
+                }
+              }
+              return {
+                ...layer,
+                x: layer.x + 2
+              }
+            }
+            return layer
+          }))
+        }
+      }
     }
 
     const handleKeyUp = (e) => {
@@ -102,6 +356,15 @@ function App() {
       if (e.key === 'Control') {
         setIsCtrlPressed(false)
       }
+      if (e.key === 'r' || e.key === 'R') {
+        setIsRPressed(false)
+      }
+      if (e.key === 's' || e.key === 'S') {
+        setIsSPressed(false)
+      }
+      if (e.key === 'g' || e.key === 'G') {
+        setIsGPressed(false)
+      }
     }
 
     window.addEventListener('keydown', handleKeyDown)
@@ -110,7 +373,7 @@ function App() {
       window.removeEventListener('keydown', handleKeyDown)
       window.removeEventListener('keyup', handleKeyUp)
     }
-  }, [history, historyIndex])
+  }, [isRPressed, isSPressed, isGPressed, selectedLayerId, layers, history, historyIndex])
 
   const renderCanvas = () => {
     const canvas = canvasRef.current
@@ -122,6 +385,11 @@ function App() {
 
     ctx.fillStyle = '#1a1a2e'
     ctx.fillRect(0, 0, canvas.width, canvas.height)
+
+    // Apply zoom and pan transformations
+    ctx.save()
+    ctx.translate(panOffset.x, panOffset.y)
+    ctx.scale(zoomLevel, zoomLevel)
 
     layers.forEach(layer => {
       if (layer.visible) {
@@ -138,9 +406,57 @@ function App() {
         
         if (layer.type === 'image' && layer.image && layer.image.complete) {
           const img = layer.image
-          const x = layer.x - layer.width / 2
-          const y = layer.y - layer.height / 2
-          ctx.drawImage(img, x, y, layer.width, layer.height)
+          const flipX = layer.flipX || false
+          const flipY = layer.flipY || false
+          const scale = layer.scale || 1
+          const red = layer.red || 255
+          const green = layer.green || 255
+          const blue = layer.blue || 255
+          
+          // Apply transformation filters
+          const brightness = layer.brightness || 100
+          const contrast = layer.contrast || 100
+          const blur = layer.blur || 0
+          
+          ctx.filter = `brightness(${brightness}%) contrast(${contrast}%) blur(${blur}px)`
+          
+          // Calculate dimensions with scale
+          const scaledWidth = layer.width * scale
+          const scaledHeight = layer.height * scale
+          const x = layer.x - scaledWidth / 2
+          const y = layer.y - scaledHeight / 2
+          
+          // Apply mirror effects
+          ctx.save()
+          ctx.translate(layer.x, layer.y)
+          if (flipX) ctx.scale(-1, 1)
+          if (flipY) ctx.scale(1, -1)
+          ctx.translate(-layer.x, -layer.y)
+          
+          // Apply RGB color adjustment using overlay
+          if (red !== 255 || green !== 255 || blue !== 255) {
+            // Draw image first
+            ctx.drawImage(img, x, y, scaledWidth, scaledHeight)
+            
+            // Apply color overlay with better blending
+            ctx.globalCompositeOperation = 'color'
+            ctx.fillStyle = `rgba(${red}, ${green}, ${blue}, 0.5)`
+            ctx.fillRect(x, y, scaledWidth, scaledHeight)
+            ctx.globalCompositeOperation = 'source-over'
+          } else {
+            ctx.drawImage(img, x, y, scaledWidth, scaledHeight)
+          }
+          
+          // Apply sharpness using contrast filter
+          const sharpness = layer.sharpness || 0
+          if (sharpness > 0) {
+            ctx.filter = `contrast(${100 + sharpness / 2}%) saturate(${100 + sharpness / 3}%)`
+            ctx.drawImage(canvas, x, y, scaledWidth, scaledHeight, x, y, scaledWidth, scaledHeight)
+            ctx.filter = 'none'
+          }
+          
+          ctx.restore()
+          ctx.filter = 'none'
         } else if (layer.type === 'text') {
           ctx.font = `${layer.fontSize}px Arial`
           ctx.fillStyle = layer.color
@@ -192,11 +508,14 @@ function App() {
       let bounds = { x: 0, y: 0, width: 0, height: 0 }
       
       if (selectedLayer.type === 'image') {
+        const scale = selectedLayer.scale || 1
+        const scaledWidth = selectedLayer.width * scale
+        const scaledHeight = selectedLayer.height * scale
         bounds = {
-          x: selectedLayer.x - selectedLayer.width / 2,
-          y: selectedLayer.y - selectedLayer.height / 2,
-          width: selectedLayer.width,
-          height: selectedLayer.height
+          x: selectedLayer.x - scaledWidth / 2,
+          y: selectedLayer.y - scaledHeight / 2,
+          width: scaledWidth,
+          height: scaledHeight
         }
       } else if (selectedLayer.type === 'text') {
         const fontSize = selectedLayer.fontSize || 48
@@ -283,6 +602,9 @@ function App() {
       // Restore context
       ctx.restore()
     }
+
+    // Restore zoom and pan transformations
+    ctx.restore()
   }
 
   const handleImageUpload = (e) => {
@@ -363,6 +685,34 @@ function App() {
     setSelectedLayerId(newLayer.id)
     setShowMoreOptions(false)
     saveToHistory(newLayers)
+  }
+
+  const resetLayerTransformations = (layerId) => {
+    const newLayers = layers.map(l => {
+      if (l.id === layerId) {
+        return {
+          ...l,
+          scale: 1,
+          rotation: 0,
+          offsetX: 0,
+          offsetY: 0,
+          brightness: 100,
+          contrast: 100,
+          red: 255,
+          green: 255,
+          blue: 255,
+          sharpness: 0,
+          opacity: 1,
+          blur: 0,
+          flipX: false,
+          flipY: false
+        }
+      }
+      return l
+    })
+    setLayers(newLayers)
+    saveToHistory(newLayers)
+    setResetConfirmModal(false)
   }
 
   const addSquareLayer = () => {
@@ -522,6 +872,11 @@ function App() {
       })
     }
 
+    // Save to database
+    const projectId = Date.now().toString()
+    saveProject(projectId, 'Untitled Project', projectData)
+
+    // Also save as file for export
     const blob = new Blob([JSON.stringify(projectData)], { type: 'application/json' })
     const link = document.createElement('a')
     link.download = 'project.aria'
@@ -558,6 +913,11 @@ function App() {
         setSelectedLayerId(null)
         setHistory([])
         setHistoryIndex(-1)
+        
+        // Save to database
+        const projectId = Date.now().toString()
+        saveProject(projectId, file.name.replace('.aria', ''), projectData)
+        
         setFileMenu({ visible: false, x: 0, y: 0 })
       } catch (error) {
         console.error('Error loading project:', error)
@@ -616,8 +976,9 @@ function App() {
       if (l.type === 'image') {
         return {
           ...l,
-          width: baseWidth * scale,
-          height: baseHeight * scale,
+          width: baseWidth,
+          height: baseHeight,
+          scale: scale,
           x: currentRatio.width / 2,
           y: currentRatio.height / 2,
           rotation: 0
@@ -676,10 +1037,17 @@ function App() {
       if (l.id !== layerId) return l
       
       if (l.type === 'image') {
+        const baseWidth = l.width
+        const baseHeight = l.height
+        const scale = Math.min(
+          currentRatio.width / baseWidth,
+          currentRatio.height / baseHeight
+        )
         return {
           ...l,
-          width: currentRatio.width,
-          height: currentRatio.height,
+          width: baseWidth,
+          height: baseHeight,
+          scale: scale,
           x: currentRatio.width / 2,
           y: currentRatio.height / 2,
           rotation: 0
@@ -781,8 +1149,9 @@ function App() {
       if (l.type === 'image') {
         return {
           ...l,
-          width: baseWidth * scale,
-          height: baseHeight * scale,
+          width: baseWidth,
+          height: baseHeight,
+          scale: scale,
           x: currentRatio.width / 2,
           y: currentRatio.height / 2,
           rotation: 0
@@ -866,24 +1235,110 @@ function App() {
     setContextMenu({ visible: false, x: 0, y: 0, layerId: null })
   }
 
+  const resetElementToDefault = (layerId) => {
+    const layer = layers.find(l => l.id === layerId)
+    if (!layer) return
+
+    const newLayers = layers.map(l => {
+      if (l.id !== layerId) return l
+      
+      if (l.type === 'image') {
+        const originalWidth = l.originalWidth || l.width
+        const originalHeight = l.originalHeight || l.height
+        return {
+          ...l,
+          width: originalWidth,
+          height: originalHeight,
+          x: currentRatio.width / 2,
+          y: currentRatio.height / 2,
+          rotation: 0
+        }
+      } else if (l.type === 'text' || l.type === 'emoji') {
+        const originalFontSize = l.originalFontSize || (l.fontSize || (l.type === 'emoji' ? 80 : 48))
+        return {
+          ...l,
+          fontSize: originalFontSize,
+          x: currentRatio.width / 2,
+          y: currentRatio.height / 2,
+          rotation: 0
+        }
+      } else if (l.type === 'circle') {
+        const originalRadius = l.originalRadius || l.radius
+        return {
+          ...l,
+          radius: originalRadius,
+          x: currentRatio.width / 2,
+          y: currentRatio.height / 2,
+          rotation: 0
+        }
+      } else if (l.type === 'square') {
+        const originalSize = l.originalSize || l.size
+        return {
+          ...l,
+          size: originalSize,
+          x: currentRatio.width / 2,
+          y: currentRatio.height / 2,
+          rotation: 0
+        }
+      } else if (l.type === 'line') {
+        const originalX1 = l.originalX1 || l.x1
+        const originalY1 = l.originalY1 || l.y1
+        const originalX2 = l.originalX2 || l.x2
+        const originalY2 = l.originalY2 || l.y2
+        return {
+          ...l,
+          x1: originalX1,
+          y1: originalY1,
+          x2: originalX2,
+          y2: originalY2,
+          rotation: 0
+        }
+      } else if (l.type === 'gradient') {
+        return {
+          ...l,
+          x: currentRatio.width / 2,
+          y: currentRatio.height / 2,
+          rotation: 0
+        }
+      }
+      return l
+    })
+
+    setLayers(newLayers)
+    saveToHistory(newLayers)
+    setContextMenu({ visible: false, x: 0, y: 0, layerId: null })
+  }
+
   const getCanvasCoordinates = (e) => {
     const canvas = canvasRef.current
     const rect = canvas.getBoundingClientRect()
     const scaleX = canvas.width / rect.width
     const scaleY = canvas.height / rect.height
+    
+    // Get mouse position relative to canvas
+    const mouseX = e.clientX - rect.left
+    const mouseY = e.clientY - rect.top
+    
+    // Convert to canvas coordinates considering zoom and pan
+    const canvasX = (mouseX - panOffset.x) / zoomLevel
+    const canvasY = (mouseY - panOffset.y) / zoomLevel
+    
     return {
-      x: (e.clientX - rect.left) * scaleX,
-      y: (e.clientY - rect.top) * scaleY
+      x: canvasX,
+      y: canvasY
     }
   }
 
   const getLayerBounds = (layer) => {
     if (layer.type === 'image') {
+      const scale = layer.scale || 1
+      const scaledWidth = layer.width * scale
+      const scaledHeight = layer.height * scale
       return {
-        x: layer.x - layer.width / 2,
-        y: layer.y - layer.height / 2,
-        width: layer.width,
-        height: layer.height
+        x: layer.x - scaledWidth / 2,
+        y: layer.y - scaledHeight / 2,
+        width: scaledWidth,
+        height: scaledHeight
       }
     } else if (layer.type === 'text') {
       const fontSize = layer.fontSize || 48
@@ -956,10 +1411,13 @@ function App() {
       let isHit = false
       
       if (layer.type === 'image' && layer.image) {
-        const imgX = layer.x - layer.width / 2
-        const imgY = layer.y - layer.height / 2
-        isHit = coords.x >= imgX && coords.x <= imgX + layer.width &&
-                coords.y >= imgY && coords.y <= imgY + layer.height
+        const scale = layer.scale || 1
+        const scaledWidth = layer.width * scale
+        const scaledHeight = layer.height * scale
+        const imgX = layer.x - scaledWidth / 2
+        const imgY = layer.y - scaledHeight / 2
+        isHit = coords.x >= imgX && coords.x <= imgX + scaledWidth &&
+                coords.y >= imgY && coords.y <= imgY + scaledHeight
       } else if (layer.type === 'text' || layer.type === 'emoji') {
         const fontSize = layer.fontSize || (layer.type === 'emoji' ? 80 : 48)
         isHit = Math.abs(coords.x - layer.x) < fontSize * 2 &&
@@ -1035,6 +1493,13 @@ function App() {
       setEmojiPicker({ visible: false, x: 0, y: 0 })
     }
     
+    // If Shift is pressed, start panning the canvas
+    if (e.shiftKey) {
+      setIsPanning(true)
+      setPanStart({ x: e.clientX, y: e.clientY })
+      return
+    }
+    
     // First check if clicking on resize handle of selected layer
     const selectedLayer = layers.find(l => l.id === selectedLayerId)
     if (selectedLayer && selectedLayer.type !== 'gradient') {
@@ -1070,7 +1535,20 @@ function App() {
           // Otherwise, start resizing
           setIsResizing(true)
           setResizeHandle(handle)
-          setResizeStart({ x: coords.x, y: coords.y, width: bounds.width, height: bounds.height })
+          // For images, store the current scale instead of width/height
+          if (selectedLayer.type === 'image') {
+            setResizeStart({ 
+              x: coords.x, 
+              y: coords.y, 
+              width: bounds.width, 
+              height: bounds.height,
+              baseScale: selectedLayer.scale || 1,
+              baseWidth: selectedLayer.width,
+              baseHeight: selectedLayer.height
+            })
+          } else {
+            setResizeStart({ x: coords.x, y: coords.y, width: bounds.width, height: bounds.height })
+          }
           return
         }
       }
@@ -1097,18 +1575,30 @@ function App() {
         isHit = Math.abs(coords.x - layer.x) < fontSize * 2 &&
                 Math.abs(coords.y - layer.y) < fontSize
       } else if (layer.type === 'image' && layer.image) {
-        const imgX = layer.x - layer.width / 2
-        const imgY = layer.y - layer.height / 2
-        isHit = coords.x >= imgX && coords.x <= imgX + layer.width &&
-                coords.y >= imgY && coords.y <= imgY + layer.height
+        const scale = layer.scale || 1
+        const scaledWidth = layer.width * scale
+        const scaledHeight = layer.height * scale
+        const imgX = layer.x - scaledWidth / 2
+        const imgY = layer.y - scaledHeight / 2
+        isHit = coords.x >= imgX && coords.x <= imgX + scaledWidth &&
+                coords.y >= imgY && coords.y <= imgY + scaledHeight
+      } else if (layer.type === 'line') {
+        const dist = pointToLineDistance(coords.x, coords.y, layer.x1, layer.y1, layer.x2, layer.y2)
+        isHit = dist < 10
       }
       
       if (isHit) {
         setSelectedLayerId(layer.id)
-        setIsDragging(true)
+        setMouseDownPosition(coords)
         setDraggedLayerId(layer.id)
         setDragStart(coords)
         setDragDirection(null) // Reset drag direction
+        
+        // Auto-show transform panel when selecting a layer
+        if (autoShowTransform) {
+          setTransformPanel({ visible: true, layerId: layer.id })
+        }
+        
         return
       }
     }
@@ -1134,9 +1624,41 @@ function App() {
 
   const handleMouseMove = (e) => {
     const coords = getCanvasCoordinates(e)
+    const isShiftPressedNow = e.shiftKey // Use actual keyboard state from event
+    
+    // Handle panning when Shift is pressed
+    if (isPanning) {
+      const dx = e.clientX - panStart.x
+      const dy = e.clientY - panStart.y
+      setPanOffset({
+        x: panOffset.x + dx,
+        y: panOffset.y + dy
+      })
+      setPanStart({ x: e.clientX, y: e.clientY })
+      return
+    }
+    
+    // Check if we should start dragging (only if mouse moved significantly from down position)
+    if (mouseDownPosition && !isDragging && draggedLayerId) {
+      const dx = coords.x - mouseDownPosition.x
+      const dy = coords.y - mouseDownPosition.y
+      const distance = Math.sqrt(dx * dx + dy * dy)
+      
+      // Only start dragging if moved more than 5 pixels
+      if (distance > 5) {
+        setIsDragging(true)
+        setMouseDownPosition(null)
+      }
+    }
     
     // Update cursor when hovering over handles with CTRL-SHIFT key
-    if (!isRotating && !isResizing && !isDragging) {
+    if (!isRotating && !isResizing && !isDragging && !isPanning) {
+      // Show grab cursor when Shift is pressed for panning
+      if (isShiftPressedNow) {
+        canvasRef.current.style.cursor = 'grab'
+        return
+      }
+      
       const selectedLayer = layers.find(l => l.id === selectedLayerId)
       if (selectedLayer && selectedLayer.type !== 'gradient') {
         const bounds = getLayerBounds(selectedLayer)
@@ -1171,6 +1693,8 @@ function App() {
           }
         }
       }
+    } else if (isPanning) {
+      canvasRef.current.style.cursor = 'grabbing'
     }
     
     if (isRotating && selectedLayerId) {
@@ -1263,10 +1787,17 @@ function App() {
         const newHeight = Math.max(20, resizeStart.height * scaleY)
         
         if (layer.type === 'image') {
+          const baseScale = resizeStart.baseScale || 1
+          const baseWidth = resizeStart.baseWidth
+          const baseHeight = resizeStart.baseHeight
+          const currentScaledWidth = baseWidth * baseScale
+          const currentScaledHeight = baseHeight * baseScale
+          const targetWidth = currentScaledWidth * scaleX
+          const targetHeight = currentScaledHeight * scaleY
+          const newScale = Math.max(0.1, (targetWidth / baseWidth + targetHeight / baseHeight) / 2)
           return {
             ...layer,
-            width: newWidth,
-            height: newHeight
+            scale: newScale
           }
         } else if (layer.type === 'square') {
           const newSize = Math.max(newWidth, newHeight)
@@ -1313,25 +1844,33 @@ function App() {
     const dx = coords.x - dragStart.x
     const dy = coords.y - dragStart.y
     
-    // Determine drag direction if Shift is pressed and direction not set
-    if (isShiftPressed && !dragDirection) {
-      const absDx = Math.abs(dx)
-      const absDy = Math.abs(dy)
-      if (absDx > absDy) {
-        setDragDirection('horizontal')
-      } else if (absDy > absDx) {
-        setDragDirection('vertical')
-      }
-    }
-    
-    // Constrain movement based on drag direction
+    // Constrain movement based on drag direction (only when Shift is pressed)
     let constrainedDx = dx
     let constrainedDy = dy
     
-    if (isShiftPressed && dragDirection === 'horizontal') {
-      constrainedDy = 0
-    } else if (isShiftPressed && dragDirection === 'vertical') {
-      constrainedDx = 0
+    if (e.shiftKey) {
+      // Determine drag direction if not set
+      if (!dragDirection) {
+        const absDx = Math.abs(dx)
+        const absDy = Math.abs(dy)
+        if (absDx > absDy) {
+          setDragDirection('horizontal')
+        } else if (absDy > absDx) {
+          setDragDirection('vertical')
+        }
+      }
+      
+      // Apply constraint based on direction
+      if (dragDirection === 'horizontal') {
+        constrainedDy = 0
+      } else if (dragDirection === 'vertical') {
+        constrainedDx = 0
+      }
+    } else {
+      // Reset drag direction when Shift is not pressed
+      if (dragDirection) {
+        setDragDirection(null)
+      }
     }
     
     setLayers(layers.map(layer => {
@@ -1368,6 +1907,9 @@ function App() {
     setIsRotating(false)
     setRotationStart({ x: 0, y: 0, angle: 0, centerX: 0, centerY: 0 })
     setDragDirection(null) // Reset drag direction
+    setMouseDownPosition(null) // Reset mouse down position
+    setIsPanning(false) // Reset panning state
+    setPanStart({ x: 0, y: 0 }) // Reset pan start
     // Don't exit rotation mode on mouse up - it persists until double-click
   }
 
@@ -1379,7 +1921,13 @@ function App() {
         {/* Left Toolbar - Photoshop Style */}
         <div className="w-16 bg-card border-r border-border flex flex-col items-center py-4 gap-2">
           <button
-            onClick={() => fileInputRef.current?.click()}
+            onClick={() => {
+              setShowMoreOptions(false)
+              setAspectRatioMenu(false)
+              setFileMenu({ visible: false, x: 0, y: 0 })
+              setEmojiPicker({ visible: false, x: 0, y: 0 })
+              fileInputRef.current?.click()
+            }}
             className="w-12 h-12 flex items-center justify-center rounded-lg hover:bg-primary/20 transition tooltip-container"
             title="Subir Imagen"
           >
@@ -1394,7 +1942,13 @@ function App() {
           />
           
           <button
-            onClick={addTextLayer}
+            onClick={() => {
+              setShowMoreOptions(false)
+              setAspectRatioMenu(false)
+              setFileMenu({ visible: false, x: 0, y: 0 })
+              setEmojiPicker({ visible: false, x: 0, y: 0 })
+              addTextLayer()
+            }}
             className="w-12 h-12 flex items-center justify-center rounded-lg hover:bg-primary/20 transition"
             title="Texto"
           >
@@ -1474,6 +2028,39 @@ function App() {
             title="Archivo"
           >
             <Download size={20} />
+          </button>
+          
+          <button
+            onClick={() => {
+              setZoomLevel(1)
+              setPanOffset({ x: 0, y: 0 })
+            }}
+            className="w-12 h-12 flex items-center justify-center rounded-lg hover:bg-primary/20 transition"
+            title="Resetear Zoom"
+          >
+            <ZoomIn size={20} />
+          </button>
+          
+          <button
+            onClick={() => {
+              const newZoomLevel = Math.max(0.1, Math.min(5, zoomLevel * 1.2))
+              setZoomLevel(newZoomLevel)
+            }}
+            className="w-12 h-12 flex items-center justify-center rounded-lg hover:bg-primary/20 transition"
+            title="Zoom In"
+          >
+            <Plus size={20} />
+          </button>
+          
+          <button
+            onClick={() => {
+              const newZoomLevel = Math.max(0.1, Math.min(5, zoomLevel * 0.8))
+              setZoomLevel(newZoomLevel)
+            }}
+            className="w-12 h-12 flex items-center justify-center rounded-lg hover:bg-primary/20 transition"
+            title="Zoom Out"
+          >
+            <Minus size={20} />
           </button>
           
           <div className="relative">
@@ -1576,6 +2163,24 @@ function App() {
                               <AlignCenter size={16} />
                               Enviar al centro
                             </button>
+                            <button
+                              onClick={() => resetElementToDefault(contextMenu.layerId)}
+                              className="w-full flex items-center gap-2 px-4 py-2 hover:bg-primary/20 transition text-left"
+                            >
+                              <RotateCcw size={16} />
+                              Restablecer imagen predeterminada
+                            </button>
+                            <button
+                              onClick={() => {
+                                setAutoShowTransform(!autoShowTransform)
+                                setTransformPanel({ visible: !autoShowTransform, layerId: contextMenu.layerId })
+                                setContextMenu({ visible: false, x: 0, y: 0, layerId: null })
+                              }}
+                              className="w-full flex items-center gap-2 px-4 py-2 hover:bg-primary/20 transition text-left"
+                            >
+                              <Layout size={16} />
+                              {autoShowTransform ? 'Ocultar opciones de transformación' : 'Mostrar opciones de transformación'}
+                            </button>
                             <div className="border-t border-border my-1"></div>
                           </>
                         )
@@ -1598,29 +2203,39 @@ function App() {
 
             <div className="w-80">
               <div className="bg-card rounded-lg border border-border p-4">
-              <div className="flex items-center gap-2 mb-4">
-                <Layers size={20} className="text-primary" />
-                <h2 className="text-lg font-semibold">Capas</h2>
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2">
+                  <Layers size={20} className="text-primary" />
+                  <h2 className="text-lg font-semibold">Capas</h2>
+                </div>
+                <button
+                  onClick={() => setLayersCollapsed(!layersCollapsed)}
+                  className="p-1 hover:bg-primary/20 rounded"
+                >
+                  {layersCollapsed ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
+                </button>
               </div>
 
-              {layers.length === 0 ? (
-                <p className="text-muted-foreground text-sm text-center py-8">
-                  No hay capas. Sube una imagen o agrega texto.
-                </p>
-              ) : (
-                <div className="space-y-2">
-                  {[...layers].reverse().map((layer, reverseIndex) => {
-                    const index = layers.length - 1 - reverseIndex
-                    return (
-                      <div
-                        key={layer.id}
-                        className={`p-3 rounded border transition cursor-pointer ${
-                          selectedLayerId === layer.id
-                            ? 'bg-primary/20 border-primary'
-                            : 'bg-secondary border-border hover:border-primary'
-                        }`}
-                        onClick={() => setSelectedLayerId(layer.id)}
-                      >
+              {!layersCollapsed && (
+                <div className="max-h-96 overflow-y-auto">
+                  {layers.length === 0 ? (
+                    <p className="text-muted-foreground text-sm text-center py-8">
+                      No hay capas. Sube una imagen o agrega texto.
+                    </p>
+                  ) : (
+                    <div className="space-y-2">
+                      {[...layers].reverse().map((layer, reverseIndex) => {
+                        const index = layers.length - 1 - reverseIndex
+                        return (
+                          <div
+                            key={layer.id}
+                            className={`p-3 rounded border transition cursor-pointer ${
+                              selectedLayerId === layer.id
+                                ? 'bg-primary/20 border-primary'
+                                : 'bg-secondary border-border hover:border-primary'
+                            }`}
+                            onClick={() => setSelectedLayerId(layer.id)}
+                          >
                         <div className="flex items-center justify-between mb-2">
                           <div className="flex items-center gap-2">
                             {layer.type === 'image' ? (
@@ -1702,11 +2317,366 @@ function App() {
                           <span className="text-xs w-8">{Math.round(layer.opacity * 100)}%</span>
                         </div>
                       </div>
-                    )
-                  })}
+                        )
+                      })}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
+
+            {transformPanel.visible && (
+              <div className="bg-card rounded-lg border border-border p-4 mt-4">
+                <div className="flex items-center justify-between mb-4">
+                  <div className="flex items-center gap-2">
+                    <Layout size={20} className="text-primary" />
+                    <h2 className="text-lg font-semibold">Transformación</h2>
+                  </div>
+                  <div className="flex gap-1">
+                    <button
+                      onClick={() => setTransformCollapsed(!transformCollapsed)}
+                      className="p-1 hover:bg-primary/20 rounded"
+                    >
+                      {transformCollapsed ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
+                    </button>
+                    <button
+                      onClick={() => setTransformPanel({ visible: false, layerId: null })}
+                      className="p-1 hover:bg-primary/20 rounded"
+                    >
+                      <Plus size={16} className="rotate-45" />
+                    </button>
+                  </div>
+                </div>
+
+                {!transformCollapsed && (() => {
+                  const layer = layers.find(l => l.id === transformPanel.layerId)
+                  if (!layer) return null
+
+                  return (
+                    <div className="max-h-96 overflow-y-auto space-y-4">
+                      {/* Reset Button */}
+                      <button
+                        onClick={() => setResetConfirmModal(true)}
+                        className="w-full py-2 px-4 bg-destructive/10 hover:bg-destructive/20 text-destructive rounded-lg text-sm font-medium transition"
+                      >
+                        Restablecer Transformaciones
+                      </button>
+                      {/* Scale */}
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-xs text-muted-foreground">Escala:</span>
+                          <span className="text-xs w-12">{Math.round((layer.scale || 1) * 100)}%</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="0.1"
+                          max="3"
+                          step="0.01"
+                          value={layer.scale || 1}
+                          onChange={(e) => {
+                            const newLayers = layers.map(l => 
+                              l.id === layer.id ? { ...l, scale: parseFloat(e.target.value) } : l
+                            )
+                            setLayers(newLayers)
+                          }}
+                          className="w-full h-1 bg-secondary rounded-lg appearance-none cursor-pointer"
+                        />
+                      </div>
+
+                      {/* Rotation */}
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-xs text-muted-foreground">Rotación:</span>
+                          <span className="text-xs w-12">{Math.round(layer.rotation || 0)}°</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="-180"
+                          max="180"
+                          step="1"
+                          value={layer.rotation || 0}
+                          onChange={(e) => {
+                            const newLayers = layers.map(l => 
+                              l.id === layer.id ? { ...l, rotation: parseFloat(e.target.value) } : l
+                            )
+                            setLayers(newLayers)
+                          }}
+                          className="w-full h-1 bg-secondary rounded-lg appearance-none cursor-pointer"
+                        />
+                        {/* Preset rotation buttons */}
+                        <div className="flex gap-1 mt-2">
+                          {[-180, -90, -45, 0, 45, 90, 180].map(angle => (
+                            <button
+                              key={angle}
+                              onClick={() => {
+                                const newLayers = layers.map(l => 
+                                  l.id === layer.id ? { ...l, rotation: angle } : l
+                                )
+                                setLayers(newLayers)
+                              }}
+                              className="px-2 py-1 text-xs bg-secondary hover:bg-primary/20 rounded"
+                            >
+                              {angle}°
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Mirror effects */}
+                      <div>
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-xs text-muted-foreground">Espejo:</span>
+                        </div>
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => {
+                              const newLayers = layers.map(l => 
+                                l.id === layer.id ? { ...l, flipX: !(l.flipX || false) } : l
+                              )
+                              setLayers(newLayers)
+                            }}
+                            className={`flex-1 px-2 py-1 text-xs rounded ${layer.flipX ? 'bg-primary/20' : 'bg-secondary hover:bg-primary/20'}`}
+                          >
+                            Horizontal
+                          </button>
+                          <button
+                            onClick={() => {
+                              const newLayers = layers.map(l => 
+                                l.id === layer.id ? { ...l, flipY: !(l.flipY || false) } : l
+                              )
+                              setLayers(newLayers)
+                            }}
+                            className={`flex-1 px-2 py-1 text-xs rounded ${layer.flipY ? 'bg-primary/20' : 'bg-secondary hover:bg-primary/20'}`}
+                          >
+                            Vertical
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Position X */}
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-xs text-muted-foreground">Posición X:</span>
+                          <span className="text-xs w-12">{Math.round(layer.x)}</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="0"
+                          max={currentRatio.width}
+                          step="1"
+                          value={layer.x}
+                          onChange={(e) => {
+                            const newLayers = layers.map(l => 
+                              l.id === layer.id ? { ...l, x: parseFloat(e.target.value) } : l
+                            )
+                            setLayers(newLayers)
+                          }}
+                          className="w-full h-1 bg-secondary rounded-lg appearance-none cursor-pointer"
+                        />
+                      </div>
+
+                      {/* Position Y */}
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-xs text-muted-foreground">Posición Y:</span>
+                          <span className="text-xs w-12">{Math.round(layer.y)}</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="0"
+                          max={currentRatio.height}
+                          step="1"
+                          value={layer.y}
+                          onChange={(e) => {
+                            const newLayers = layers.map(l => 
+                              l.id === layer.id ? { ...l, y: parseFloat(e.target.value) } : l
+                            )
+                            setLayers(newLayers)
+                          }}
+                          className="w-full h-1 bg-secondary rounded-lg appearance-none cursor-pointer"
+                        />
+                      </div>
+
+                      {/* Brightness */}
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-xs text-muted-foreground">Brillo:</span>
+                          <span className="text-xs w-12">{Math.round((layer.brightness || 100))}%</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="0"
+                          max="200"
+                          step="1"
+                          value={layer.brightness || 100}
+                          onChange={(e) => {
+                            const newLayers = layers.map(l => 
+                              l.id === layer.id ? { ...l, brightness: parseFloat(e.target.value) } : l
+                            )
+                            setLayers(newLayers)
+                          }}
+                          className="w-full h-1 bg-secondary rounded-lg appearance-none cursor-pointer"
+                        />
+                      </div>
+
+                      {/* Contrast */}
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-xs text-muted-foreground">Contraste:</span>
+                          <span className="text-xs w-12">{Math.round((layer.contrast || 100))}%</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="0"
+                          max="200"
+                          step="1"
+                          value={layer.contrast || 100}
+                          onChange={(e) => {
+                            const newLayers = layers.map(l => 
+                              l.id === layer.id ? { ...l, contrast: parseFloat(e.target.value) } : l
+                            )
+                            setLayers(newLayers)
+                          }}
+                          className="w-full h-1 bg-secondary rounded-lg appearance-none cursor-pointer"
+                        />
+                      </div>
+
+                      {/* Blur */}
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-xs text-muted-foreground">Blur:</span>
+                          <span className="text-xs w-12">{Math.round((layer.blur || 0))}px</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="0"
+                          max="20"
+                          step="0.5"
+                          value={layer.blur || 0}
+                          onChange={(e) => {
+                            const newLayers = layers.map(l => 
+                              l.id === layer.id ? { ...l, blur: parseFloat(e.target.value) } : l
+                            )
+                            setLayers(newLayers)
+                          }}
+                          className="w-full h-1 bg-secondary rounded-lg appearance-none cursor-pointer"
+                        />
+                      </div>
+
+                      {/* Opacity */}
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-xs text-muted-foreground">Opacidad:</span>
+                          <span className="text-xs w-12">{Math.round((layer.opacity || 1) * 100)}%</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="0"
+                          max="1"
+                          step="0.01"
+                          value={layer.opacity || 1}
+                          onChange={(e) => {
+                            const newLayers = layers.map(l => 
+                              l.id === layer.id ? { ...l, opacity: parseFloat(e.target.value) } : l
+                            )
+                            setLayers(newLayers)
+                          }}
+                          className="w-full h-1 bg-secondary rounded-lg appearance-none cursor-pointer"
+                        />
+                      </div>
+
+                      {/* RGBA - Red */}
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-xs text-muted-foreground">Rojo (R):</span>
+                          <span className="text-xs w-12">{Math.round((layer.red || 255))}</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="0"
+                          max="255"
+                          step="1"
+                          value={layer.red || 255}
+                          onChange={(e) => {
+                            const newLayers = layers.map(l => 
+                              l.id === layer.id ? { ...l, red: parseFloat(e.target.value) } : l
+                            )
+                            setLayers(newLayers)
+                          }}
+                          className="w-full h-1 bg-secondary rounded-lg appearance-none cursor-pointer"
+                        />
+                      </div>
+
+                      {/* RGBA - Green */}
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-xs text-muted-foreground">Verde (G):</span>
+                          <span className="text-xs w-12">{Math.round((layer.green || 255))}</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="0"
+                          max="255"
+                          step="1"
+                          value={layer.green || 255}
+                          onChange={(e) => {
+                            const newLayers = layers.map(l => 
+                              l.id === layer.id ? { ...l, green: parseFloat(e.target.value) } : l
+                            )
+                            setLayers(newLayers)
+                          }}
+                          className="w-full h-1 bg-secondary rounded-lg appearance-none cursor-pointer"
+                        />
+                      </div>
+
+                      {/* RGBA - Blue */}
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-xs text-muted-foreground">Azul (B):</span>
+                          <span className="text-xs w-12">{Math.round((layer.blue || 255))}</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="0"
+                          max="255"
+                          step="1"
+                          value={layer.blue || 255}
+                          onChange={(e) => {
+                            const newLayers = layers.map(l => 
+                              l.id === layer.id ? { ...l, blue: parseFloat(e.target.value) } : l
+                            )
+                            setLayers(newLayers)
+                          }}
+                          className="w-full h-1 bg-secondary rounded-lg appearance-none cursor-pointer"
+                        />
+                      </div>
+
+                      {/* Sharpness */}
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-xs text-muted-foreground">Nitidez:</span>
+                          <span className="text-xs w-12">{Math.round((layer.sharpness || 0))}%</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="0"
+                          max="100"
+                          step="1"
+                          value={layer.sharpness || 0}
+                          onChange={(e) => {
+                            const newLayers = layers.map(l => 
+                              l.id === layer.id ? { ...l, sharpness: parseFloat(e.target.value) } : l
+                            )
+                            setLayers(newLayers)
+                          }}
+                          className="w-full h-1 bg-secondary rounded-lg appearance-none cursor-pointer"
+                        />
+                      </div>
+                    </div>
+                  )
+                })()}
+              </div>
+            )}
 
             {selectedLayer && selectedLayer.type === 'text' && (
               <div className="bg-card rounded-lg border border-border p-4 mt-4">
@@ -2151,6 +3121,32 @@ function App() {
           </div>
         </div>
       </div>
+
+      {/* Reset Confirmation Modal */}
+      {resetConfirmModal && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50">
+          <div className="bg-card border border-border rounded-lg p-6 max-w-sm w-full mx-4 shadow-lg">
+            <h3 className="text-lg font-semibold mb-2">Restablecer Transformaciones</h3>
+            <p className="text-sm text-muted-foreground mb-4">
+              ¿Estás seguro de que deseas restablecer todas las transformaciones de esta capa a sus valores predeterminados? Esta acción no se puede deshacer.
+            </p>
+            <div className="flex gap-2 justify-end">
+              <button
+                onClick={() => setResetConfirmModal(false)}
+                className="px-4 py-2 bg-secondary hover:bg-secondary/80 rounded-lg text-sm font-medium transition"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={() => resetLayerTransformations(transformPanel.layerId)}
+                className="px-4 py-2 bg-destructive hover:bg-destructive/90 text-white rounded-lg text-sm font-medium transition"
+              >
+                Restablecer
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
