@@ -36,6 +36,9 @@ import {
   getAllProjects,
   deleteProject
 } from './db.js'
+import { historyManager } from './historyManager.js'
+import DebugConsole from './DebugConsole.jsx'
+import { setupUndoRedoHandlers, saveToHistory as saveToHistoryManager, restoreImagesInLayers } from './undoRedoManager.js'
 
 function App() {
   const [layers, setLayers] = useState([])
@@ -62,6 +65,7 @@ function App() {
   const [isRPressed, setIsRPressed] = useState(false)
   const [isSPressed, setIsSPressed] = useState(false)
   const [isGPressed, setIsGPressed] = useState(false)
+  const [isSpacePressed, setIsSpacePressed] = useState(false)
   const [hoveredHandle, setHoveredHandle] = useState(null)
   const [contextMenu, setContextMenu] = useState({ visible: false, x: 0, y: 0, layerId: null })
   const [fileMenu, setFileMenu] = useState({ visible: false, x: 0, y: 0 })
@@ -75,78 +79,30 @@ function App() {
   const [resetConfirmModal, setResetConfirmModal] = useState(false)
   const [autoShowTransform, setAutoShowTransform] = useState(true)
   const projectInputRef = useRef(null)
-  const [history, setHistory] = useState([])
-  const [historyIndex, setHistoryIndex] = useState(-1)
-
-  const aspectRatios = [
-    { label: '1:1', value: '1:1', width: 800, height: 800 },
-    { label: '16:9', value: '16:9', width: 960, height: 540 },
-    { label: '9:16', value: '9:16', width: 540, height: 960 },
-    { label: '4:3', value: '4:3', width: 800, height: 600 },
-    { label: '3:4', value: '3:4', width: 600, height: 800 },
-    { label: '2:3', value: '2:3', width: 533, height: 800 },
-  ]
-
-  const currentRatio = aspectRatios.find(r => r.value === aspectRatio)
-
-  const saveToHistory = (newLayers) => {
-    const newHistory = history.slice(0, historyIndex + 1)
-    newHistory.push(JSON.parse(JSON.stringify(newLayers)))
-    setHistory(newHistory)
-    setHistoryIndex(newHistory.length - 1)
-    saveHistory(newHistory)
-  }
-
-  // Initialize database and load saved data
+  const [debugConsoleVisible, setDebugConsoleVisible] = useState(false)
+  const titleClickCountRef = useRef(0)
+  const titleClickTimerRef = useRef(null)
+  
+  // Refs for selectedLayerId and layers to avoid stale closures in event handlers
+  const selectedLayerIdRef = useRef(selectedLayerId)
+  const layersRef = useRef(layers)
+  
+  // Update refs when values change
   useEffect(() => {
-    const initApp = async () => {
-      await initDatabase()
-      
-      // Load saved aspect ratio
-      const savedAspectRatio = await getSetting('aspectRatio')
-      if (savedAspectRatio) {
-        setAspectRatio(savedAspectRatio)
-      }
-      
-      // Load saved layers
-      const savedLayers = await getLayers()
-      if (savedLayers.length > 0) {
-        setLayers(savedLayers)
-      }
-      
-      // Load saved history
-      const savedHistory = await getHistory()
-      if (savedHistory.length > 0) {
-        setHistory(savedHistory)
-        setHistoryIndex(savedHistory.length - 1)
-      }
-    }
+    selectedLayerIdRef.current = selectedLayerId
+    layersRef.current = layers
+  }, [selectedLayerId, layers])
+
+  // KEYBOARD EVENT LISTENERS - MOVIDO AL INICIO PARA ASEGURAR EJECUCIÓN
+  useEffect(() => {
+    console.log('=== ADJUNTANDO EVENT LISTENERS ===')
     
-    initApp()
-  }, [])
-
-  // Auto-save layers to database when they change (debounced)
-  useEffect(() => {
-    if (layers.length === 0) return
+    // Configurar Ctrl Z y Ctrl Shift Z usando el módulo independiente
+    const cleanupUndoRedo = setupUndoRedoHandlers(setLayers)
     
-    const timeoutId = setTimeout(() => {
-      saveLayers(layers)
-    }, 500) // Save after 500ms of no changes
-    
-    return () => clearTimeout(timeoutId)
-  }, [layers])
-
-  // Auto-save aspect ratio to database when it changes
-  useEffect(() => {
-    saveSetting('aspectRatio', aspectRatio)
-  }, [aspectRatio])
-
-  useEffect(() => {
-    renderCanvas()
-  }, [layers, aspectRatio, zoomLevel, panOffset])
-
-  useEffect(() => {
     const handleKeyDown = (e) => {
+      console.log('=== KEYDOWN ===', e.key, 'ctrlKey:', e.ctrlKey, 'altKey:', e.altKey)
+      
       if (e.key === 'Shift') {
         setIsShiftPressed(true)
       }
@@ -162,18 +118,13 @@ function App() {
       if (e.key === 'g' || e.key === 'G') {
         setIsGPressed(true)
       }
-      if (e.ctrlKey && e.key === 'z') {
-        e.preventDefault()
-        if (e.altKey && historyIndex < history.length - 1) {
-          // Redo (CTRL-ALT-Z)
-          const newLayers = JSON.parse(JSON.stringify(history[historyIndex + 1]))
-          setLayers(newLayers)
-          setHistoryIndex(historyIndex + 1)
-        } else if (!e.altKey && historyIndex > 0) {
-          // Undo (CTRL-Z)
-          const newLayers = JSON.parse(JSON.stringify(history[historyIndex - 1]))
-          setLayers(newLayers)
-          setHistoryIndex(historyIndex - 1)
+      if (e.key === ' ') {
+        setIsSpacePressed(true)
+        e.preventDefault() // Prevent page scroll
+      }
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (selectedLayerIdRef.current) {
+          deleteLayer(selectedLayerIdRef.current)
         }
       }
       
@@ -184,11 +135,11 @@ function App() {
       }
       
       // Rotate with R + Arrow keys
-      if (isRPressed && selectedLayerId) {
+      if (isRPressed && selectedLayerIdRef.current) {
         if (e.key === 'ArrowRight') {
           e.preventDefault()
-          setLayers(layers.map(layer => {
-            if (layer.id === selectedLayerId) {
+          setLayers(layersRef.current.map(layer => {
+            if (layer.id === selectedLayerIdRef.current) {
               return {
                 ...layer,
                 rotation: (layer.rotation || 0) + 5
@@ -198,8 +149,8 @@ function App() {
           }))
         } else if (e.key === 'ArrowLeft') {
           e.preventDefault()
-          setLayers(layers.map(layer => {
-            if (layer.id === selectedLayerId) {
+          setLayers(layersRef.current.map(layer => {
+            if (layer.id === selectedLayerIdRef.current) {
               return {
                 ...layer,
                 rotation: (layer.rotation || 0) - 5
@@ -211,11 +162,11 @@ function App() {
       }
       
       // Scale with S + Arrow keys
-      if (isSPressed && selectedLayerId) {
+      if (isSPressed && selectedLayerIdRef.current) {
         if (e.key === 'ArrowUp') {
           e.preventDefault()
-          setLayers(layers.map(layer => {
-            if (layer.id === selectedLayerId) {
+          setLayers(layersRef.current.map(layer => {
+            if (layer.id === selectedLayerIdRef.current) {
               if (layer.type === 'image') {
                 return {
                   ...layer,
@@ -242,8 +193,8 @@ function App() {
           }))
         } else if (e.key === 'ArrowDown') {
           e.preventDefault()
-          setLayers(layers.map(layer => {
-            if (layer.id === selectedLayerId) {
+          setLayers(layersRef.current.map(layer => {
+            if (layer.id === selectedLayerIdRef.current) {
               if (layer.type === 'image') {
                 return {
                   ...layer,
@@ -272,11 +223,11 @@ function App() {
       }
       
       // Move with G + Arrow keys
-      if (isGPressed && selectedLayerId) {
+      if (isGPressed && selectedLayerIdRef.current) {
         if (e.key === 'ArrowUp') {
           e.preventDefault()
-          setLayers(layers.map(layer => {
-            if (layer.id === selectedLayerId) {
+          setLayers(layersRef.current.map(layer => {
+            if (layer.id === selectedLayerIdRef.current) {
               if (layer.type === 'line') {
                 return {
                   ...layer,
@@ -293,8 +244,8 @@ function App() {
           }))
         } else if (e.key === 'ArrowDown') {
           e.preventDefault()
-          setLayers(layers.map(layer => {
-            if (layer.id === selectedLayerId) {
+          setLayers(layersRef.current.map(layer => {
+            if (layer.id === selectedLayerIdRef.current) {
               if (layer.type === 'line') {
                 return {
                   ...layer,
@@ -311,8 +262,8 @@ function App() {
           }))
         } else if (e.key === 'ArrowLeft') {
           e.preventDefault()
-          setLayers(layers.map(layer => {
-            if (layer.id === selectedLayerId) {
+          setLayers(layersRef.current.map(layer => {
+            if (layer.id === selectedLayerIdRef.current) {
               if (layer.type === 'line') {
                 return {
                   ...layer,
@@ -329,8 +280,8 @@ function App() {
           }))
         } else if (e.key === 'ArrowRight') {
           e.preventDefault()
-          setLayers(layers.map(layer => {
-            if (layer.id === selectedLayerId) {
+          setLayers(layersRef.current.map(layer => {
+            if (layer.id === selectedLayerIdRef.current) {
               if (layer.type === 'line') {
                 return {
                   ...layer,
@@ -365,15 +316,118 @@ function App() {
       if (e.key === 'g' || e.key === 'G') {
         setIsGPressed(false)
       }
+      if (e.key === ' ') {
+        setIsSpacePressed(false)
+      }
     }
 
     window.addEventListener('keydown', handleKeyDown)
     window.addEventListener('keyup', handleKeyUp)
+    console.log('Event listeners adjuntados')
     return () => {
+      cleanupUndoRedo()
+      console.log('Removiendo event listeners')
       window.removeEventListener('keydown', handleKeyDown)
       window.removeEventListener('keyup', handleKeyUp)
     }
-  }, [isRPressed, isSPressed, isGPressed, selectedLayerId, layers, history, historyIndex])
+  }, [])
+
+  const handleTitleClick = () => {
+    console.log('=== TITLE CLICK === count:', titleClickCountRef.current + 1)
+    titleClickCountRef.current += 1
+    
+    if (titleClickCountRef.current === 1) {
+      titleClickTimerRef.current = setTimeout(() => {
+        console.log('Triple clic timeout - reset count')
+        titleClickCountRef.current = 0
+      }, 500)
+    } else if (titleClickCountRef.current === 3) {
+      console.log('TRIPLE CLIC DETECTADO - toggle console')
+      clearTimeout(titleClickTimerRef.current)
+      titleClickCountRef.current = 0
+      setDebugConsoleVisible(!debugConsoleVisible)
+    }
+  }
+
+  const aspectRatios = [
+    { label: '1:1', value: '1:1', width: 800, height: 800 },
+    { label: '16:9', value: '16:9', width: 960, height: 540 },
+    { label: '9:16', value: '9:16', width: 540, height: 960 },
+    { label: '4:3', value: '4:3', width: 800, height: 600 },
+    { label: '3:4', value: '3:4', width: 600, height: 800 },
+    { label: '2:3', value: '2:3', width: 533, height: 800 },
+  ]
+
+  const currentRatio = aspectRatios.find(r => r.value === aspectRatio)
+
+  const saveToHistory = (newLayers) => {
+    saveToHistoryManager(newLayers, saveHistory)
+  }
+
+  const resetHistory = () => {
+    console.log('=== REINICIANDO HISTORIAL ===')
+    historyManager.clear()
+    historyManager.pushState(layers)
+    const historyData = historyManager.getData()
+    saveHistory(historyData.history)
+    console.log('Historial reiniciado con estado actual')
+  }
+
+  // Initialize database and load saved data
+  useEffect(() => {
+    const initApp = async () => {
+      await initDatabase()
+      
+      // Load saved aspect ratio
+      const savedAspectRatio = await getSetting('aspectRatio')
+      if (savedAspectRatio) {
+        setAspectRatio(savedAspectRatio)
+      }
+      
+      // Load saved layers
+      const savedLayers = await getLayers()
+      if (savedLayers.length > 0) {
+        const restoredLayers = await restoreImagesInLayers(savedLayers)
+        setLayers(restoredLayers)
+      }
+      
+      // Load saved history
+      const savedHistory = await getHistory()
+      if (savedHistory.length > 0) {
+        // LIMPIEZA AGRESIVA: Siempre limpiar historial al inicio para evitar estados corruptos
+        console.log('Limpiando historial corrupto al inicio')
+        historyManager.clear()
+        const currentLayers = savedLayers.length > 0 ? savedLayers : []
+        historyManager.pushState(currentLayers)
+      } else {
+        // Initialize history with current layers
+        const currentLayers = savedLayers.length > 0 ? savedLayers : []
+        historyManager.pushState(currentLayers)
+      }
+    }
+    
+    initApp()
+  }, [])
+
+  // Auto-save layers to database when they change (debounced)
+  useEffect(() => {
+    if (layers.length === 0) return
+    
+    const timeoutId = setTimeout(() => {
+      saveLayers(layers)
+    }, 500) // Save after 500ms of no changes
+    
+    return () => clearTimeout(timeoutId)
+  }, [layers])
+
+  // Auto-save aspect ratio to database when it changes
+  useEffect(() => {
+    saveSetting('aspectRatio', aspectRatio)
+  }, [aspectRatio])
+
+  useEffect(() => {
+    renderCanvas()
+  }, [layers, aspectRatio, zoomLevel, panOffset])
 
   const renderCanvas = () => {
     const canvas = canvasRef.current
@@ -404,7 +458,14 @@ function App() {
           ctx.translate(-layer.x, -layer.y)
         }
         
-        if (layer.type === 'image' && layer.image && layer.image.complete) {
+        if (layer.type === 'image' && layer.image) {
+          // Verificación de seguridad: asegurar que layer.image es un objeto Image válido
+          if (!layer.image || typeof layer.image !== 'object' || !layer.image.complete) {
+            console.log('Advertencia: layer.image no es válido, saltando renderizado de capa:', layer.id)
+            ctx.restore()
+            return
+          }
+          
           const img = layer.image
           const flipX = layer.flipX || false
           const flipY = layer.flipY || false
@@ -502,107 +563,6 @@ function App() {
 
     ctx.globalAlpha = 1
 
-    // Draw selection box and handles for selected layer
-    const selectedLayer = layers.find(l => l.id === selectedLayerId)
-    if (selectedLayer && selectedLayer.type !== 'gradient') {
-      let bounds = { x: 0, y: 0, width: 0, height: 0 }
-      
-      if (selectedLayer.type === 'image') {
-        const scale = selectedLayer.scale || 1
-        const scaledWidth = selectedLayer.width * scale
-        const scaledHeight = selectedLayer.height * scale
-        bounds = {
-          x: selectedLayer.x - scaledWidth / 2,
-          y: selectedLayer.y - scaledHeight / 2,
-          width: scaledWidth,
-          height: scaledHeight
-        }
-      } else if (selectedLayer.type === 'text') {
-        const fontSize = selectedLayer.fontSize || 48
-        const textWidth = ctx.measureText(selectedLayer.text).width
-        bounds = {
-          x: selectedLayer.x - textWidth / 2,
-          y: selectedLayer.y - fontSize,
-          width: textWidth,
-          height: fontSize * 1.2
-        }
-      } else if (selectedLayer.type === 'circle') {
-        bounds = {
-          x: selectedLayer.x - selectedLayer.radius,
-          y: selectedLayer.y - selectedLayer.radius,
-          width: selectedLayer.radius * 2,
-          height: selectedLayer.radius * 2
-        }
-      } else if (selectedLayer.type === 'square') {
-        bounds = {
-          x: selectedLayer.x - selectedLayer.size / 2,
-          y: selectedLayer.y - selectedLayer.size / 2,
-          width: selectedLayer.size,
-          height: selectedLayer.size
-        }
-      } else if (selectedLayer.type === 'emoji') {
-        const fontSize = selectedLayer.fontSize || 80
-        bounds = {
-          x: selectedLayer.x - fontSize,
-          y: selectedLayer.y - fontSize,
-          width: fontSize * 2,
-          height: fontSize * 2
-        }
-      }
-
-      // Save context and apply rotation for selection box
-      ctx.save()
-      const rotation = selectedLayer.rotation || 0
-      const centerX = selectedLayer.x
-      const centerY = selectedLayer.y
-      
-      // Move to center, rotate, then move back
-      ctx.translate(centerX, centerY)
-      ctx.rotate(rotation * Math.PI / 180)
-      ctx.translate(-centerX, -centerY)
-
-      // Draw dotted selection box
-      ctx.strokeStyle = '#00ffff'
-      ctx.lineWidth = 1
-      ctx.setLineDash([5, 5])
-      ctx.strokeRect(bounds.x, bounds.y, bounds.width, bounds.height)
-      ctx.setLineDash([])
-
-      // Draw resize handles
-      const handleSize = 8
-      const handles = [
-        { x: bounds.x, y: bounds.y }, // top-left
-        { x: bounds.x + bounds.width / 2, y: bounds.y }, // top-center
-        { x: bounds.x + bounds.width, y: bounds.y }, // top-right
-        { x: bounds.x + bounds.width, y: bounds.y + bounds.height / 2 }, // right-center
-        { x: bounds.x + bounds.width, y: bounds.y + bounds.height }, // bottom-right
-        { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height }, // bottom-center
-        { x: bounds.x, y: bounds.y + bounds.height }, // bottom-left
-        { x: bounds.x, y: bounds.y + bounds.height / 2 }, // left-center
-      ]
-
-      handles.forEach(handle => {
-        ctx.fillStyle = '#00ffff'
-        if (rotationMode) {
-          // Draw circular handles in rotation mode
-          ctx.beginPath()
-          ctx.arc(handle.x, handle.y, handleSize / 2, 0, Math.PI * 2)
-          ctx.fill()
-        } else {
-          // Draw square handles in normal mode
-          ctx.fillRect(
-            handle.x - handleSize / 2,
-            handle.y - handleSize / 2,
-            handleSize,
-            handleSize
-          )
-        }
-      })
-
-      // Restore context
-      ctx.restore()
-    }
-
     // Restore zoom and pan transformations
     ctx.restore()
   }
@@ -615,6 +575,8 @@ function App() {
     reader.onload = (event) => {
       const img = new Image()
       img.onload = () => {
+        console.log('=== IMAGEN CARGADA ===')
+        console.log('Data URL length:', event.target.result.length)
         const scale = Math.min(
           currentRatio.width / img.width,
           currentRatio.height / img.height
@@ -624,6 +586,7 @@ function App() {
           type: 'image',
           name: file.name,
           image: img,
+          imageData: event.target.result, // Guardar data URL para serialización
           x: currentRatio.width / 2,
           y: currentRatio.height / 2,
           width: img.width * scale,
@@ -1320,8 +1283,8 @@ function App() {
     const mouseY = e.clientY - rect.top
     
     // Convert to canvas coordinates considering zoom and pan
-    const canvasX = (mouseX - panOffset.x) / zoomLevel
-    const canvasY = (mouseY - panOffset.y) / zoomLevel
+    const canvasX = (mouseX * scaleX - panOffset.x) / zoomLevel
+    const canvasY = (mouseY * scaleY - panOffset.y) / zoomLevel
     
     return {
       x: canvasX,
@@ -1493,8 +1456,8 @@ function App() {
       setEmojiPicker({ visible: false, x: 0, y: 0 })
     }
     
-    // If Shift is pressed, start panning the canvas
-    if (e.shiftKey) {
+    // If Shift or Space is pressed, start panning the canvas
+    if (e.shiftKey || e.key === ' ' || isSpacePressed) {
       setIsPanning(true)
       setPanStart({ x: e.clientX, y: e.clientY })
       return
@@ -1582,6 +1545,14 @@ function App() {
         const imgY = layer.y - scaledHeight / 2
         isHit = coords.x >= imgX && coords.x <= imgX + scaledWidth &&
                 coords.y >= imgY && coords.y <= imgY + scaledHeight
+        console.log('Hit detection imagen:', { 
+          layerId: layer.id, 
+          coords, 
+          imgX, imgY, 
+          scaledWidth, scaledHeight, 
+          scale,
+          isHit 
+        })
       } else if (layer.type === 'line') {
         const dist = pointToLineDistance(coords.x, coords.y, layer.x1, layer.y1, layer.x2, layer.y2)
         isHit = dist < 10
@@ -1602,6 +1573,12 @@ function App() {
         return
       }
     }
+    
+    // If clicked on empty canvas area, deselect all layers
+    setSelectedLayerId(null)
+    setTransformPanel({ visible: false, layerId: null })
+    setDraggedLayerId(null)
+    setMouseDownPosition(null)
   }
 
   const handleDoubleClick = (e) => {
@@ -1653,8 +1630,8 @@ function App() {
     
     // Update cursor when hovering over handles with CTRL-SHIFT key
     if (!isRotating && !isResizing && !isDragging && !isPanning) {
-      // Show grab cursor when Shift is pressed for panning
-      if (isShiftPressedNow) {
+      // Show grab cursor when Shift or Space is pressed for panning
+      if (isShiftPressedNow || isSpacePressed) {
         canvasRef.current.style.cursor = 'grab'
         return
       }
@@ -2102,7 +2079,13 @@ function App() {
         {/* Main Content */}
         <div className="flex-1 flex flex-col p-4">
           <header className="mb-4">
-            <h1 className="text-2xl font-bold text-primary">Aria Photo Editor</h1>
+            <h1 
+              className="text-2xl font-bold text-primary cursor-pointer select-none"
+              onClick={handleTitleClick}
+              title="Haz clic 3 veces para mostrar/ocultar consola de depuración"
+            >
+              Aria Photo Editor
+            </h1>
           </header>
 
           <div className="flex gap-4 flex-1">
@@ -3147,6 +3130,8 @@ function App() {
           </div>
         </div>
       )}
+      
+      {debugConsoleVisible && <DebugConsole />}
     </div>
   )
 }
