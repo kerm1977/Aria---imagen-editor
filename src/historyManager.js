@@ -26,7 +26,7 @@ class HistoryManager {
   undo() {
     console.log('=== historyManager.undo ===')
     console.log('currentIndex:', this.currentIndex, 'history.length:', this.history.length)
-    if (this.currentIndex > 0) {
+    if (this.currentIndex >= 0) {
       this.currentIndex--
       const state = JSON.parse(JSON.stringify(this.history[this.currentIndex]))
       console.log('Undo exitoso - nuevo currentIndex:', this.currentIndex)
@@ -43,7 +43,7 @@ class HistoryManager {
       this.notifyListeners()
       return state
     }
-    console.log('Undo falló - currentIndex <= 0')
+    console.log('Undo falló - currentIndex < 0')
     return null
   }
 

@@ -42,15 +42,30 @@ export const restoreImagesInLayers = async (layers) => {
   console.log('Capas:', layers.map(l => ({ id: l.id, type: l.type, hasImageData: !!l.imageData, hasImage: !!l.image })))
   
   const restoredLayers = await Promise.all(layers.map(async (layer) => {
-    if (layer.type === 'image' && layer.imageData) {
-      console.log('Restaurando imagen para capa:', layer.id)
-      const img = new Image()
-      img.src = layer.imageData
-      await new Promise((resolve) => {
-        img.onload = resolve
-      })
-      console.log('Imagen restaurada para capa:', layer.id, 'image.complete:', img.complete)
-      return { ...layer, image: img }
+    if (layer.type === 'image') {
+      if (layer.imageData) {
+        console.log('Restaurando imagen para capa:', layer.id, 'desde imageData')
+        const img = new Image()
+        await new Promise((resolve, reject) => {
+          img.onload = () => {
+            console.log('Imagen cargada para capa:', layer.id, 'image.complete:', img.complete)
+            resolve()
+          }
+          img.onerror = () => {
+            console.error('Error cargando imagen para capa:', layer.id)
+            resolve() // Continue even if image fails to load
+          }
+          img.src = layer.imageData
+        })
+        console.log('Imagen restaurada para capa:', layer.id, 'image.complete:', img.complete)
+        return { ...layer, image: img }
+      } else if (layer.image && layer.image.complete) {
+        console.log('Imagen ya válida para capa:', layer.id)
+        return layer
+      } else {
+        console.log('ADVERTENCIA: Capa de imagen sin imageData ni image válido:', layer.id)
+        return layer
+      }
     }
     return layer
   }))
